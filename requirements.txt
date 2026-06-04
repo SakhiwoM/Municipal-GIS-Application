@@ -1,0 +1,4 @@
+PySide6
+pandas
+geopandas
+requests
