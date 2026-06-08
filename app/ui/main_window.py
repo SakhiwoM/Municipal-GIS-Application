@@ -1,26 +1,58 @@
 import os
 import sys
-import json
 import io
+import json
 import folium
 from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                              QPushButton, QFileDialog, QLabel, QMessageBox, 
-                             QFrame, QSplitter)
-from PySide6.QtCore import Qt
+                             QFrame, QSplitter, QTableWidget, QTableWidgetItem,
+                             QAbstractItemView, QHeaderView)
+from PySide6.QtCore import Qt, QObject, Signal, Slot
+from PySide6.QtWebChannel import QWebChannel
 from PySide6.QtWebEngineWidgets import QWebEngineView
 
 # Safe import from app/core/
 try:
     from app.core.import_cadastre import process_csv_to_geojson
     from app.core.link_data import link_cadastre_to_valuation
+    from app.core.map_layers import add_base_layers, build_geojson_click_handler, inject_qwebchannel_bridge
+    from app.core.spatial_utils import get_preferred_plot_title
     from app.core.edit_gis import launch_external_gis
 except ImportError:
     def process_csv_to_geojson(file_path):
         return {"type": "FeatureCollection", "features": []}
     def link_cadastre_to_valuation(s, c, join_column):
         return {"type": "FeatureCollection", "features": []}
+    def add_base_layers(leaflet_map, google_maps_api_key=None):
+        return leaflet_map
+    def build_geojson_click_handler(bridge_object_name="mapBridge", method_name="handleFeatureClick"):
+        return None
+    def inject_qwebchannel_bridge(leaflet_map, bridge_object_name="mapBridge"):
+        return leaflet_map
+    def get_preferred_plot_title(properties, feature_id=None):
+        return str(feature_id) if feature_id is not None else "Selected Plot"
     def launch_external_gis(file_path):
         return "Fallback"
+
+
+class MapClickBridge(QObject):
+    featureSelected = Signal(object)
+
+    @Slot(str)
+    def handleFeatureClick(self, feature_json):
+        try:
+            feature_data = json.loads(feature_json)
+            if not isinstance(feature_data, dict):
+                raise ValueError("Expected feature data to be an object.")
+        except Exception:
+            feature_data = {
+                "id": None,
+                "geometry": None,
+                "properties": {},
+                "raw": feature_json,
+            }
+
+        self.featureSelected.emit(feature_data)
 
 
 class CollapsibleMenu(QWidget):
@@ -120,75 +152,144 @@ class MainWindow(QMainWindow):
         # PANEL 2 (CENTER/MAIN): LIVE LEAFLET MAP VIEWPORT
         # ----------------------------------------------------
         self.map_view = QWebEngineView()
+        self.map_bridge = MapClickBridge(self)
+        self.web_channel = QWebChannel(self.map_view.page())
+        self.web_channel.registerObject("mapBridge", self.map_bridge)
+        self.map_view.page().setWebChannel(self.web_channel)
+        self.map_bridge.featureSelected.connect(self.update_attribute_panel)
         self.eswatini_center = [-26.52, 31.46]
         self.main_splitter.addWidget(self.map_view)
 
-        # Set final default splitter sizes (Sidebar takes 240px, Map expands to fill the rest)
-        self.main_splitter.setSizes([240, 860])
-        
+        # ----------------------------------------------------
+        # PANEL 3 (RIGHT): ATTRIBUTE DETAILS SIDEBAR
+        # ----------------------------------------------------
+        self.attribute_panel = QFrame()
+        self.attribute_panel.setFrameShape(QFrame.StyledPanel)
+        self.attribute_panel.setStyleSheet("background-color: #ffffff;")
+        self.attribute_panel.setMinimumWidth(280)
+
+        attribute_layout = QVBoxLayout(self.attribute_panel)
+        attribute_layout.setContentsMargins(10, 10, 10, 10)
+        attribute_layout.setSpacing(8)
+
+        self.attribute_title = QLabel("No plot selected")
+        self.attribute_title.setStyleSheet("font-weight: bold; font-size: 14px; color: #2c3e50;")
+        attribute_layout.addWidget(self.attribute_title)
+
+        self.attribute_summary = QLabel("Click a plot on the map to view its cadastre attributes here.")
+        self.attribute_summary.setWordWrap(True)
+        self.attribute_summary.setStyleSheet("color: #34495e; font-size: 12px;")
+        attribute_layout.addWidget(self.attribute_summary)
+
+        self.attribute_table = QTableWidget(0, 2)
+        self.attribute_table.setHorizontalHeaderLabels(["Field", "Value"])
+        self.attribute_table.verticalHeader().setVisible(False)
+        self.attribute_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.attribute_table.setSelectionMode(QAbstractItemView.NoSelection)
+        self.attribute_table.setAlternatingRowColors(True)
+        self.attribute_table.setWordWrap(True)
+        self.attribute_table.horizontalHeader().setStretchLastSection(True)
+        self.attribute_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        attribute_layout.addWidget(self.attribute_table)
+
+        self.main_splitter.addWidget(self.attribute_panel)
+
+        self.clear_attribute_panel()
+        # Start with the attribute sidebar fully collapsed.
+        self.main_splitter.setSizes([240, 860, 0])
         self.load_base_map(self.eswatini_center, starting_zoom=9)
 
     def load_base_map(self, center_coords, starting_zoom=9, geojson_overlay=None):
         """Generates a dynamic Leaflet map using folium and updates the view."""
+        self.clear_attribute_panel()
         leaflet_map = folium.Map(
             location=center_coords,
             zoom_start=starting_zoom,
-            tiles="OpenStreetMap",
+            tiles=None,
             control_scale=True
         )
+        add_base_layers(leaflet_map, google_maps_api_key=os.getenv("GOOGLE_MAPS_API_KEY"))
+        inject_qwebchannel_bridge(leaflet_map)
 
         if geojson_overlay and geojson_overlay.get("features"):
-            # Dynamically extract all unique feature property attributes key labels from dataset 
-            # to map them comprehensively inside the popup tooltip matrix structure
-            sample_feature = geojson_overlay["features"][0]
-            property_fields = list(sample_feature.get("properties", {}).keys())
+            renderable_features = [feature for feature in geojson_overlay["features"] if feature.get("geometry")]
 
-            if property_fields:
-                # Setup custom styled table HTML formatting matrix for clear rendering on hover
-                aliases = [f"<b>{field.upper()}:</b>" for field in property_fields]
-                map_tooltip = folium.GeoJsonTooltip(
-                    fields=property_fields,
-                    aliases=aliases,
-                    localize=True,
-                    sticky=True,
-                    style="""
-                        background-color: #ffffff;
-                        border: 1px solid #2c3e50;
-                        border-radius: 4px;
-                        box-shadow: 2px 2px 6px rgba(0,0,0,0.2);
-                        font-family: sans-serif;
-                        font-size: 11px;
-                        padding: 8px;
-                        color: #2c3e50;
-                    """
+            if renderable_features:
+                renderable_geojson = dict(geojson_overlay)
+                renderable_geojson["features"] = renderable_features
+
+                geojson_layer = folium.GeoJson(
+                    renderable_geojson,
+                    name="Cadastre Layer",
+                    style_function=lambda x: {
+                        'fillColor': '#3498db',
+                        'color': '#2980b9',
+                        'weight': 1.5,
+                        'fillOpacity': 0.4
+                    },
+                    highlight_function=lambda x: {
+                        'fillColor': '#3498db',
+                        'color': '#e74c3c',
+                        'weight': 3.5,
+                        'fillOpacity': 0.6
+                    },
+                    popup=None,
+                    on_each_feature=build_geojson_click_handler()
                 )
-            else:
-                map_tooltip = None
+                geojson_layer.add_to(leaflet_map)
 
-            geojson_layer = folium.GeoJson(
-                geojson_overlay,
-                name="Cadastre Layer",
-                style_function=lambda x: {
-                    'fillColor': '#3498db',
-                    'color': '#2980b9',
-                    'weight': 1.5,
-                    'fillOpacity': 0.4
-                },
-                highlight_function=lambda x: {
-                    'fillColor': '#3498db',
-                    'color': '#e74c3c',
-                    'weight': 3.5,
-                    'fillOpacity': 0.6
-                },
-                tooltip=map_tooltip
-            )
-            geojson_layer.add_to(leaflet_map)
-            folium.LayerControl().add_to(leaflet_map)
+        folium.LayerControl(collapsed=False).add_to(leaflet_map)
 
         map_buffer = io.BytesIO()
         leaflet_map.save(map_buffer, close_file=False)
         map_html_string = map_buffer.getvalue().decode()
         self.map_view.setHtml(map_html_string)
+
+    def clear_attribute_panel(self):
+        self.attribute_panel.hide()
+        self.attribute_title.setText("No plot selected")
+        self.attribute_summary.setText("Click a plot on the map to view its cadastre attributes here.")
+        self.attribute_table.setRowCount(0)
+
+    def update_attribute_panel(self, feature_data):
+        self.attribute_panel.show()
+        properties = feature_data.get("properties") or {}
+        geometry = feature_data.get("geometry") or {}
+        geometry_type = geometry.get("type") or "Unknown"
+        feature_id = feature_data.get("id")
+
+        selected_title = get_preferred_plot_title(properties, feature_id=feature_id)
+        self.attribute_title.setText(selected_title)
+        self.attribute_summary.setText(f"Geometry: {geometry_type}")
+
+        rows = [
+            ("Plot Title", self.format_attribute_value(selected_title)),
+            ("Feature ID", self.format_attribute_value(feature_id)),
+            ("Geometry Type", self.format_attribute_value(geometry_type)),
+        ]
+        for field_name, field_value in properties.items():
+            rows.append((field_name, self.format_attribute_value(field_value)))
+
+        self.attribute_table.setRowCount(len(rows))
+        for row_index, (field_name, field_value) in enumerate(rows):
+            field_item = QTableWidgetItem(str(field_name))
+            value_item = QTableWidgetItem(str(field_value))
+            field_item.setFlags(field_item.flags() & ~Qt.ItemIsEditable)
+            value_item.setFlags(value_item.flags() & ~Qt.ItemIsEditable)
+            self.attribute_table.setItem(row_index, 0, field_item)
+            self.attribute_table.setItem(row_index, 1, value_item)
+
+        self.attribute_table.resizeRowsToContents()
+        self.attribute_table.scrollToTop()
+        self.main_splitter.setSizes([240, max(self.map_view.width(), 1), 300])
+
+    @staticmethod
+    def format_attribute_value(value):
+        if value is None or value == "":
+            return "-"
+        if isinstance(value, (dict, list)):
+            return json.dumps(value, ensure_ascii=False)
+        return str(value)
 
     def trigger_cadastre_import(self):
         """Processes a shapefile and dynamically re-renders it on the live map view."""
@@ -205,19 +306,29 @@ class MainWindow(QMainWindow):
             geojson_data = process_csv_to_geojson(file_path)
             
             if geojson_data and geojson_data.get("features"):
-                first_feat = geojson_data["features"][0]
-                geom_type = first_feat["geometry"]["type"]
                 new_center = self.eswatini_center
-                
-                if geom_type == "Point":
-                    coords = first_feat["geometry"]["coordinates"]
-                    new_center = [coords[1], coords[0]]
-                elif geom_type in ["Polygon", "MultiPolygon"]:
-                    if geom_type == "Polygon":
-                        first_pt = first_feat["geometry"]["coordinates"][0][0]
-                    else:
-                        first_pt = first_feat["geometry"]["coordinates"][0][0][0]
-                    new_center = [first_pt[1], first_pt[0]]
+
+                bbox = geojson_data.get("bbox")
+                if bbox and len(bbox) == 4:
+                    minx, miny, maxx, maxy = bbox
+                    new_center = [(miny + maxy) / 2, (minx + maxx) / 2]
+                else:
+                    first_feat = next(
+                        (feature for feature in geojson_data["features"] if feature.get("geometry")),
+                        None
+                    )
+                    if first_feat:
+                        geom_type = first_feat["geometry"]["type"]
+
+                        if geom_type == "Point":
+                            coords = first_feat["geometry"]["coordinates"]
+                            new_center = [coords[1], coords[0]]
+                        elif geom_type in ["Polygon", "MultiPolygon"]:
+                            if geom_type == "Polygon":
+                                first_pt = first_feat["geometry"]["coordinates"][0][0]
+                            else:
+                                first_pt = first_feat["geometry"]["coordinates"][0][0][0]
+                            new_center = [first_pt[1], first_pt[0]]
 
                 self.load_base_map(center_coords=new_center, starting_zoom=14, geojson_overlay=geojson_data)
                 
@@ -228,7 +339,7 @@ class MainWindow(QMainWindow):
                     f"Successfully mapped {total_records} features onto the interactive view!"
                 )
             else:
-                QMessageBox.warning(self, "Data Warning", "The file was parsed but contains empty spatial vectors.")
+                QMessageBox.warning(self, "Data Warning", "The file loaded successfully, but no renderable spatial features were found.")
                 
         except Exception as e:
             QMessageBox.critical(self, "Processing Error", f"Failed to display layers on Leaflet engine:\n{str(e)}")

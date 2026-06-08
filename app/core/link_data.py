@@ -1,6 +1,7 @@
-import json
 import pandas as pd
 import geopandas as gpd
+
+from .spatial_utils import geodataframe_to_feature_collection, normalize_column_names
 
 def link_cadastre_to_valuation(shapefile_path, valuation_csv_path, join_column="erf_id"):
     """
@@ -10,11 +11,11 @@ def link_cadastre_to_valuation(shapefile_path, valuation_csv_path, join_column="
     try:
         # 1. Read your spatial cadastre layer (Shapefile)
         gdf = gpd.read_file(shapefile_path)
-        gdf.columns = gdf.columns.str.strip().str.lower()
+        gdf = normalize_column_names(gdf)
 
         # 2. Read your tabular financial records sheet (CSV Valuation Roll)
         df = pd.read_csv(valuation_csv_path)
-        df.columns = df.columns.str.strip().str.lower()
+        df.columns = [str(column).strip().lower() for column in df.columns]
 
         # Normalize the join column name to lower-case to prevent matching issues
         join_column = join_column.strip().lower()
@@ -31,7 +32,7 @@ def link_cadastre_to_valuation(shapefile_path, valuation_csv_path, join_column="
             merged_gdf = merged_gdf.to_crs(epsg=4326)
 
         # 5. Convert back into a standard Python dictionary GeoJSON payload
-        return json.loads(merged_gdf.to_json())
+        return geodataframe_to_feature_collection(merged_gdf)
 
     except Exception as e:
         raise RuntimeError(f"Database Join Failure: {str(e)}")
