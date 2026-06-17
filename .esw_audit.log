@@ -1,0 +1,17 @@
+[2026-06-16 14:25:38] Failed login: wrong password for 'admin'
+[2026-06-16 14:25:50] Failed login: wrong password for 'admin'
+[2026-06-16 14:26:10] Login success: 'admin' (Administrator)
+[2026-06-16 14:43:08] Failed login: unknown user 'gdh'
+[2026-06-16 14:43:26] Failed login: wrong password for 'admin'
+[2026-06-16 14:43:33] Failed login: wrong password for 'admin'
+[2026-06-16 14:43:39] Failed login: wrong password for 'admin'
+[2026-06-16 14:43:43] Failed login: wrong password for 'admin'
+[2026-06-16 14:43:45] Account locked: 'admin' after 5 failed attempts
+[2026-06-16 15:50:35] User registered: 'city' (Viewer)
+[2026-06-16 15:50:48] Login success: 'city' (Viewer)
+[2026-06-16 16:05:00] Login success: 'city' (Viewer)
+[2026-06-16 16:16:42] Login success: 'city' (Viewer)
+[2026-06-16 16:48:45] Login success: 'city' (Viewer)
+[2026-06-17 10:15:32] Login success: 'city' (Viewer)
+[2026-06-17 12:07:32] Login success: 'city' (Viewer)
+[2026-06-17 12:09:39] Login success: 'city' (Viewer)
